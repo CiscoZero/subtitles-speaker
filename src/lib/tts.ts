@@ -18,8 +18,55 @@ let activeToken = 0;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Desktop (Electron) bridge. Chromium in Electron ships without the Windows
+ * speech component, so the packaged app talks to SAPI through the main process
+ * instead of the Web Speech API.
+ */
+type NativeTtsBridge = {
+  listVoices: () => Promise<{ name: string; lang: string }[]>;
+  speak: (options: {
+    text: string;
+    rate: number;
+    pitch: number;
+    volume: number;
+    voice: string | null;
+  }) => Promise<string>;
+  cancel: () => void;
+};
+
+export function nativeTts(): NativeTtsBridge | null {
+  if (typeof window === "undefined") return null;
+  const bridge = (window as unknown as { echoTts?: NativeTtsBridge }).echoTts;
+  return bridge ?? null;
+}
+
+export async function listNativeVoices(): Promise<SpeechSynthesisVoice[]> {
+  const bridge = nativeTts();
+  if (!bridge) return [];
+  try {
+    const raw = await bridge.listVoices();
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((voice) => voice && typeof voice.name === "string" && voice.name.length > 0)
+      .map(
+        (voice) =>
+          ({
+            name: voice.name,
+            voiceURI: voice.name,
+            lang: voice.lang || "",
+            localService: true,
+            default: false,
+          }) as unknown as SpeechSynthesisVoice,
+      );
+  } catch {
+    return [];
+  }
+}
+
 export function isSpeechSupported(): boolean {
-  return typeof window !== "undefined" && "speechSynthesis" in window;
+  if (typeof window === "undefined") return false;
+  return nativeTts() !== null || "speechSynthesis" in window;
 }
 
 export function isChineseVoice(voice: SpeechSynthesisVoice): boolean {
@@ -161,11 +208,73 @@ function speakOne(text: string, opts: SpeakOptions): Promise<SpeakResult> {
   });
 }
 
+let nativePlayer: HTMLAudioElement | null = null;
+let nativeResolver: ((result: SpeakResult) => void) | null = null;
+
+/** Abort whatever the SAPI bridge is doing and resolve the pending promise. */
+function settleNative(result: SpeakResult) {
+  const resolve = nativeResolver;
+  nativeResolver = null;
+  const player = nativePlayer;
+  nativePlayer = null;
+  if (player) {
+    player.pause();
+    player.removeAttribute("src");
+  }
+  nativeTts()?.cancel();
+  resolve?.(result);
+}
+
+async function speakNative(text: string, opts: SpeakOptions): Promise<SpeakResult> {
+  const bridge = nativeTts();
+  if (!bridge) return "error";
+  const token = ++activeToken;
+
+  let audioUrl = "";
+  try {
+    audioUrl = await bridge.speak({
+      text,
+      rate: opts.rate ?? 1,
+      pitch: opts.pitch ?? 1,
+      volume: opts.volume ?? 1,
+      voice: opts.voice?.voiceURI ?? null,
+    });
+  } catch {
+    return token === activeToken ? "error" : "cancelled";
+  }
+  if (token !== activeToken) return "cancelled";
+  if (!audioUrl) return "error";
+
+  return new Promise<SpeakResult>((resolve) => {
+    const audio = new Audio(audioUrl);
+    nativePlayer = audio;
+    nativeResolver = resolve;
+    const finish = (result: SpeakResult) => {
+      if (nativeResolver !== resolve) return;
+      nativeResolver = null;
+      if (nativePlayer === audio) nativePlayer = null;
+      resolve(result);
+    };
+    audio.onended = () => finish("done");
+    audio.onerror = () => finish("error");
+    void audio.play().catch(() => finish("error"));
+  });
+}
+
 /** Speak a whole subtitle, chunk by chunk. Resolves only when the reading is finished. */
 export async function speakText(text: string, opts: SpeakOptions = {}): Promise<SpeakResult> {
   if (!isSpeechSupported()) return "error";
   const segments = splitIntoSegments(text, 70);
   if (!segments.length) return "done";
+
+  if (nativeTts()) {
+    stopSpeech();
+    for (const segment of segments) {
+      const result = await speakNative(segment, opts);
+      if (result !== "done") return result;
+    }
+    return "done";
+  }
 
   stopSpeech();
   await sleep(70); // let cancel() settle before queueing new audio
@@ -180,6 +289,11 @@ export async function speakText(text: string, opts: SpeakOptions = {}): Promise<
 export function stopSpeech(): void {
   if (!isSpeechSupported()) return;
   activeToken += 1;
+  if (nativeTts()) {
+    // Desktop: stop the audio element and kill the running SAPI process.
+    settleNative("cancelled");
+    return;
+  }
   try {
     window.speechSynthesis.cancel();
     window.speechSynthesis.resume();
@@ -190,7 +304,7 @@ export function stopSpeech(): void {
 
 /** Unlock speech synthesis inside a user gesture so later calls are allowed. */
 export function unlockSpeech(): void {
-  if (!isSpeechSupported()) return;
+  if (!isSpeechSupported() || nativeTts()) return;
   try {
     const warmup = new SpeechSynthesisUtterance(" ");
     warmup.volume = 0;

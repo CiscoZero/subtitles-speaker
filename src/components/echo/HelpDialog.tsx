@@ -102,6 +102,27 @@ export function HelpDialog() {
             </ol>
           </Block>
 
+          <Block title="当成桌面应用 / 打包 .exe">
+            <p>
+              <b>最省事：</b>用 Edge / Chrome 打开本页，点地址栏右侧的「安装」图标（菜单 →
+              应用 → 安装此站点为应用）。桌面会多一个独立窗口的图标，双击即可用，朗读仍走系统语音。
+            </p>
+            <p>
+              <b>要真正的 .exe：</b>仓库里的{" "}
+              <code className="rounded bg-espresso/[0.08] px-1 font-mono text-[11px]">desktop/</code>{" "}
+              是一个 Electron 打包工程，在 Windows 上依次执行：
+            </p>
+            <pre className="overflow-x-auto rounded-lg bg-espresso px-3 py-2 font-mono text-[11px] leading-relaxed text-paper">
+              {["cd desktop", "npm install", "npm run check-voice", "npm run dist"].join("\n")}
+            </pre>
+            <p>
+              产物在 <code className="rounded bg-espresso/[0.08] px-1 font-mono text-[11px]">desktop/release/</code>
+              ：安装版 + 免安装便携版。<span className="rounded bg-mustard/20 px-1">注意</span>{" "}
+              打包后的 Electron 不带 Windows 语音组件，桌面版改由主进程调用系统自带的 System.Speech（SAPI）
+              合成音频再播放；先跑 <b>check-voice</b> 确认能出声，再打包。详见 desktop/README.md。
+            </p>
+          </Block>
+
           <Block title="常见问题">
             <p>
               <b>没有中文声音？</b> Windows「设置 → 时间和语言 → 语音 → 添加语音」安装「中文（简体）」，
